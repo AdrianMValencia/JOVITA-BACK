@@ -31,6 +31,8 @@ return [
     */
     'rce_compras_max_execution_seconds' => (int) env('RCE_COMPRAS_MAX_EXECUTION_SECONDS', 180),
 
+    'rce_compras_memory_limit' => env('RCE_COMPRAS_MEMORY_LIMIT', '512M'),
+
     /*
     | Tasa % IGV a informar en la columna correspondiente del libro RCE compras (p. ej. 18).
     */

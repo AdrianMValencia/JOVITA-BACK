@@ -126,6 +126,7 @@ class ContabilidadController extends Controller
 
         $tmpPath = null;
         try {
+            $rce->extendExecutionTime();
             $compras = $rce->queryCompras($idPvInt, $fechaInicio, $fechaFin, $soloActivas);
             $filas = $rce->buildFilas($compras);
             $celdasPorFila = array_map(static fn (array $f) => $f['celdas'], $filas);
