@@ -17,6 +17,10 @@ use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 class RceSireComprasService
 {
+    public function __construct(
+        private readonly XlsxSunatTemplatePreparer $templatePreparer,
+    ) {}
+
     /**
      * Columnas según «COMPRAS MODELO» SUNAT: 40 datos en cada fila a partir de la fila configurada (p. ej. 9).
      * Posición crítica: % IGV en columna 12; primer par BASE–IGV en 13–14; siguientes destinaciones en 15–18.
@@ -359,21 +363,25 @@ class RceSireComprasService
             throw new \RuntimeException('No se encuentra o no se puede leer el template RCE COMPRAS: '.$path);
         }
 
-        // Plantilla SUNAT COMPRAS.xlsx trae millones de celdas vacías (hasta col. WYP): sin podar, PhpSpreadsheet agota RAM.
-        $sanitizedPath = $this->copyTemplatePreparedForLoad($path);
+        // Plantilla liviana empaquetada (resources/templates) o caché en storage — evita 75 MB de sheet1.xml en hosting.
+        $loadPath = $this->templatePreparer->resolveForLoad(
+            $path,
+            'COMPRAS_RCE',
+            $this->firstDataRow(),
+            count(self::CABECERAS_RCE),
+            'COMPRAS_RCE_LITE.xlsx'
+        );
         try {
-            $reader = IOFactory::createReaderForFile($sanitizedPath);
+            $reader = IOFactory::createReaderForFile($loadPath);
             $reader->setReadDataOnly(false);
             $reader->setReadEmptyCells(false);
             $reader->setIncludeCharts(false);
             if (method_exists($reader, 'setIgnoreRowsWithNoCells')) {
                 $reader->setIgnoreRowsWithNoCells(true);
             }
-            $spreadsheet = $reader->load($sanitizedPath);
-        } finally {
-            if (is_file($sanitizedPath)) {
-                @unlink($sanitizedPath);
-            }
+            $spreadsheet = $reader->load($loadPath);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException('No se pudo cargar la plantilla RCE: '.$e->getMessage(), 0, $e);
         }
         $idx = $this->dataSheetIndex();
         if ($idx >= $spreadsheet->getSheetCount()) {
@@ -486,96 +494,6 @@ class RceSireComprasService
                 // rango ya no válido u hoja protegida
             }
         }
-    }
-
-    /**
-     * Copia el .xlsx y lo deja liviano para PhpSpreadsheet (validaciones, filas de ejemplo y columnas sobrantes).
-     */
-    private function copyTemplatePreparedForLoad(string $sourcePath): string
-    {
-        $dest = sys_get_temp_dir().DIRECTORY_SEPARATOR.'rce_tpl_'.uniqid('', true).'.xlsx';
-        if (! @copy($sourcePath, $dest)) {
-            throw new \RuntimeException('No se pudo copiar el template a temporal: '.$sourcePath);
-        }
-
-        $zip = new \ZipArchive();
-        if ($zip->open($dest) !== true) {
-            @unlink($dest);
-            throw new \RuntimeException('No se pudo abrir el template como ZIP (xlsx): '.$dest);
-        }
-
-        $dvPattern = '/<(?:[\w.-]+:)?dataValidations\b[^>]*\/>|<(?:[\w.-]+:)?dataValidations\b[^>]*>[\s\S]*?<\/(?:[\w.-]+:)?dataValidations>/';
-        $firstDataRow = $this->firstDataRow();
-        $maxCol = count(self::CABECERAS_RCE);
-        $lastHeaderRow = max(1, $firstDataRow - 1);
-        $lastColLetter = Coordinate::stringFromColumnIndex($maxCol);
-
-        for ($i = 0; $i < $zip->numFiles; $i++) {
-            $entryName = (string) $zip->getNameIndex($i);
-            if (! preg_match('#^xl/worksheets/sheet\d+\.xml$#i', $entryName)) {
-                continue;
-            }
-            $xml = $zip->getFromIndex($i);
-            if ($xml === false || $xml === '') {
-                continue;
-            }
-            $cleaned = preg_replace($dvPattern, '', $xml) ?? $xml;
-            $cleaned = $this->pruneWorksheetXmlForRceLoad($cleaned, $firstDataRow, $maxCol);
-            $cleaned = preg_replace(
-                '/<dimension ref="[^"]*"\s*\/>/',
-                '<dimension ref="A1:'.$lastColLetter.$lastHeaderRow.'"/>',
-                $cleaned
-            ) ?? $cleaned;
-            $cleaned = preg_replace(
-                '/<dimension ref="[^"]*">/',
-                '<dimension ref="A1:'.$lastColLetter.$lastHeaderRow.'">',
-                $cleaned
-            ) ?? $cleaned;
-            if ($cleaned !== $xml) {
-                $zip->deleteName($entryName);
-                $zip->addFromString($entryName, $cleaned);
-            }
-        }
-
-        $zip->close();
-
-        return $dest;
-    }
-
-    /**
-     * La plantilla oficial SUNAT incluye filas de ejemplo con celdas hasta columnas enormes (p. ej. WYP).
-     * Conserva solo cabeceras (filas &lt; firstDataRow) y columnas RCE (40).
-     */
-    private function pruneWorksheetXmlForRceLoad(string $xml, int $firstDataRow, int $maxCol): string
-    {
-        $out = preg_replace_callback(
-            '/<row r="(\d+)"([^>]*)>(.*?)<\/row>/s',
-            static function (array $m) use ($firstDataRow, $maxCol): string {
-                $rn = (int) $m[1];
-                if ($rn >= $firstDataRow) {
-                    return '';
-                }
-                $inner = preg_replace_callback(
-                    '/<c r="([A-Za-z]+\d+)"([^>]*)(?:\/>|>.*?<\/c>)/s',
-                    static function (array $c) use ($maxCol): string {
-                        if (! preg_match('/^([A-Za-z]+)/', $c[1], $col)) {
-                            return $c[0];
-                        }
-                        if (Coordinate::columnIndexFromString(strtoupper($col[1])) > $maxCol) {
-                            return '';
-                        }
-
-                        return $c[0];
-                    },
-                    $m[3]
-                );
-
-                return '<row r="'.$m[1].'"'.$m[2].'>'.$inner.'</row>';
-            },
-            $xml
-        );
-
-        return is_string($out) ? $out : $xml;
     }
 
     /**

@@ -24,6 +24,10 @@ class InventarioValorizadoSunatService
 {
     public const COLS = 14;
 
+    public function __construct(
+        private readonly XlsxSunatTemplatePreparer $templatePreparer,
+    ) {}
+
     private ?bool $hasEfactSerie = null;
 
     private ?bool $hasEfactNumero = null;
@@ -282,6 +286,51 @@ class InventarioValorizadoSunatService
     }
 
     /**
+     * Solo saldos iniciales/finales por producto, procesando en lotes para no agotar RAM en hosting.
+     *
+     * @param  Collection<int, Productos>  $productos
+     * @return list<array{
+     *   producto: array<string, mixed>,
+     *   periodo: array<string, mixed>,
+     *   saldo_inicial: array<string, float>,
+     *   saldo_final: array<string, float>,
+     *   filas: list<mixed>
+     * }>
+     */
+    public function buildReportesSoloSaldosEnChunks(
+        Collection $productos,
+        int $idPuntoVenta,
+        string $fechaInicio,
+        string $fechaFin,
+        bool $incluirSaldoInicial = true
+    ): array {
+        $this->extendExecutionTime();
+        $chunkSize = max(10, (int) config('contabilidad.inventario_valorizado_excel_chunk_productos', 40));
+        $reportes = [];
+
+        foreach ($productos->chunk($chunkSize) as $chunk) {
+            $parcial = $this->buildReportes(
+                $chunk,
+                $idPuntoVenta,
+                $fechaInicio,
+                $fechaFin,
+                $incluirSaldoInicial,
+                false,
+                false
+            );
+            foreach ($parcial as $r) {
+                $reportes[] = $r;
+            }
+            unset($parcial, $chunk);
+            if (function_exists('gc_collect_cycles')) {
+                gc_collect_cycles();
+            }
+        }
+
+        return $reportes;
+    }
+
+    /**
      * @return array{
      *   producto: array<string, mixed>,
      *   periodo: array<string, mixed>,
@@ -450,20 +499,23 @@ class InventarioValorizadoSunatService
             throw new \RuntimeException('No se encuentra o no se puede leer el template INVENTARIO VALORIZADO SUNAT: '.$path);
         }
 
-        $sanitizedPath = $this->copyTemplateStrippingDataValidationsXml($path);
+        $loadPath = $this->templatePreparer->resolveForLoad(
+            $path,
+            'INVENTARIO_VALORIZADO_SUNAT',
+            $this->firstDataRow(),
+            self::COLS
+        );
         try {
-            $reader = IOFactory::createReaderForFile($sanitizedPath);
+            $reader = IOFactory::createReaderForFile($loadPath);
             $reader->setReadDataOnly(false);
             $reader->setReadEmptyCells(false);
             $reader->setIncludeCharts(false);
             if (method_exists($reader, 'setIgnoreRowsWithNoCells')) {
                 $reader->setIgnoreRowsWithNoCells(true);
             }
-            $spreadsheet = $reader->load($sanitizedPath);
-        } finally {
-            if (is_file($sanitizedPath)) {
-                @unlink($sanitizedPath);
-            }
+            $spreadsheet = $reader->load($loadPath);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException('No se pudo cargar plantilla inventario valorizado: '.$e->getMessage(), 0, $e);
         }
 
         $idx = $this->dataSheetIndex();

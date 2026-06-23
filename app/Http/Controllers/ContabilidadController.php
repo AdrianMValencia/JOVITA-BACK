@@ -518,20 +518,26 @@ class ContabilidadController extends Controller
 
         $tmpPath = null;
         try {
-
-            $reportes = $inventario->buildReportes(
-                $productos,
-                $idPvInt,
-                $fechaInicio,
-                $fechaFin,
-                $incluirSaldoInicial,
-                true,
-                $kardexCompletoExcel
-            );
-
             if (! $kardexCompletoExcel) {
+                $reportes = $inventario->buildReportesSoloSaldosEnChunks(
+                    $productos,
+                    $idPvInt,
+                    $fechaInicio,
+                    $fechaFin,
+                    $incluirSaldoInicial
+                );
                 $spreadsheet = $inventario->buildResumenSpreadsheet($reportes, $fechaInicio, $fechaFin);
-            } elseif (count($reportes) === 1) {
+            } else {
+                $reportes = $inventario->buildReportes(
+                    $productos,
+                    $idPvInt,
+                    $fechaInicio,
+                    $fechaFin,
+                    $incluirSaldoInicial,
+                    true,
+                    true
+                );
+                if (count($reportes) === 1) {
                 $reporte = $reportes[0];
                 $celdasPorFila = array_map(
                     static fn (array $f) => $f['celdas'] ?? [],
@@ -557,6 +563,7 @@ class ContabilidadController extends Controller
                     ];
                 }
                 $spreadsheet = $inventario->fillTemplateSpreadsheetMulti($bloques, $fechaInicio, $fechaFin);
+                }
             }
             $spreadsheet->garbageCollect();
 
@@ -789,20 +796,15 @@ class ContabilidadController extends Controller
 
         $tmpPath = null;
         try {
-            $filasCabecera = $kardex->buildFilasCabecera(
+            $filas = $kardex->buildFilasCabeceraYDetalleEnChunks(
                 $productos,
                 $idPvInt,
                 $fechaInicio,
                 $fechaFin,
                 $incluirSaldoInicial
             );
-            $filasDetalle = $kardex->buildFilasDetalleTodos(
-                $productos,
-                $idPvInt,
-                $fechaInicio,
-                $fechaFin,
-                $incluirSaldoInicial
-            );
+            $filasCabecera = $filas['cabecera'];
+            $filasDetalle = $filas['detalle'];
 
             $spreadsheet = $kardex->fillTemplateSpreadsheet(
                 $filasCabecera,

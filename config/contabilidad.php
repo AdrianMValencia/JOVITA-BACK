@@ -31,7 +31,7 @@ return [
     */
     'rce_compras_max_execution_seconds' => (int) env('RCE_COMPRAS_MAX_EXECUTION_SECONDS', 180),
 
-    'rce_compras_memory_limit' => env('RCE_COMPRAS_MEMORY_LIMIT', '512M'),
+    'rce_compras_memory_limit' => env('RCE_COMPRAS_MEMORY_LIMIT', '1024M'),
 
     /*
     | Tasa % IGV a informar en la columna correspondiente del libro RCE compras (p. ej. 18).
@@ -74,7 +74,11 @@ return [
     */
     'inventario_valorizado_max_execution_seconds' => (int) env('INVENTARIO_VALORIZADO_MAX_EXECUTION_SECONDS', 300),
 
-    'inventario_valorizado_memory_limit' => env('INVENTARIO_VALORIZADO_MEMORY_LIMIT', '512M'),
+    'inventario_valorizado_memory_limit' => env('INVENTARIO_VALORIZADO_MEMORY_LIMIT', '1024M'),
+
+    'inventario_valorizado_excel_chunk_productos' => (int) env('INVENTARIO_VALORIZADO_EXCEL_CHUNK_PRODUCTOS', 40),
+
+    'excel_build_memory_limit' => env('CONTABILIDAD_EXCEL_BUILD_MEMORY_LIMIT', '1024M'),
 
     'inventario_valorizado_bulk_chunk' => (int) env('INVENTARIO_VALORIZADO_BULK_CHUNK', 250),
 

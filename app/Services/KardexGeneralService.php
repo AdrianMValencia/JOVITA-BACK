@@ -62,7 +62,8 @@ class KardexGeneralService
     ];
 
     public function __construct(
-        private readonly InventarioValorizadoSunatService $inventarioValorizado
+        private readonly InventarioValorizadoSunatService $inventarioValorizado,
+        private readonly XlsxSunatTemplatePreparer $templatePreparer,
     ) {}
 
     public function extendExecutionTime(): void
@@ -267,6 +268,82 @@ class KardexGeneralService
     }
 
     /**
+     * Una sola pasada de kardex por producto (cabecera + detalle) para no duplicar consultas ni RAM.
+     *
+     * @param  Collection<int, Productos>  $productos
+     * @return array{cabecera: list<array<string, mixed>>, detalle: list<array<string, mixed>>}
+     */
+    public function buildFilasCabeceraYDetalle(
+        Collection $productos,
+        int $idPuntoVenta,
+        string $fechaInicio,
+        string $fechaFin,
+        bool $incluirSaldoInicial = true
+    ): array {
+        $reportes = $this->inventarioValorizado->buildReportes(
+            $productos,
+            $idPuntoVenta,
+            $fechaInicio,
+            $fechaFin,
+            $incluirSaldoInicial,
+            false,
+            true
+        );
+
+        $porId = $productos->keyBy('id');
+        $cabecera = [];
+        $detalle = [];
+        foreach ($reportes as $reporte) {
+            $producto = $porId->get((int) ($reporte['producto']['id'] ?? 0));
+            if (! $producto) {
+                continue;
+            }
+            $cabecera[] = $this->transformarCabecera($producto, $reporte);
+            foreach ($reporte['filas'] as $fila) {
+                $detalle[] = $this->transformarDetalle($producto, $fila);
+            }
+        }
+        unset($reportes, $porId);
+
+        return ['cabecera' => $cabecera, 'detalle' => $detalle];
+    }
+
+    /**
+     * @param  Collection<int, Productos>  $productos
+     * @return array{cabecera: list<array<string, mixed>>, detalle: list<array<string, mixed>>}
+     */
+    public function buildFilasCabeceraYDetalleEnChunks(
+        Collection $productos,
+        int $idPuntoVenta,
+        string $fechaInicio,
+        string $fechaFin,
+        bool $incluirSaldoInicial = true
+    ): array {
+        $this->extendExecutionTime();
+        $chunkSize = max(10, (int) config('contabilidad.inventario_valorizado_excel_chunk_productos', 40));
+        $cabecera = [];
+        $detalle = [];
+
+        foreach ($productos->chunk($chunkSize) as $chunk) {
+            $part = $this->buildFilasCabeceraYDetalle(
+                $chunk,
+                $idPuntoVenta,
+                $fechaInicio,
+                $fechaFin,
+                $incluirSaldoInicial
+            );
+            array_push($cabecera, ...$part['cabecera']);
+            array_push($detalle, ...$part['detalle']);
+            unset($part, $chunk);
+            if (function_exists('gc_collect_cycles')) {
+                gc_collect_cycles();
+            }
+        }
+
+        return ['cabecera' => $cabecera, 'detalle' => $detalle];
+    }
+
+    /**
      * @return list<array{producto: array<string, mixed>, columnas: array<string, mixed>, celdas: list<mixed>}>
      */
     public function buildFilasDetalle(
@@ -350,20 +427,23 @@ class KardexGeneralService
             throw new \RuntimeException('No se encuentra o no se puede leer el template KARDEX GENERAL: '.$path);
         }
 
-        $sanitizedPath = $this->copyTemplateStrippingDataValidationsXml($path);
+        $loadPath = $this->templatePreparer->resolveForLoad(
+            $path,
+            'KARDEX_GENERAL',
+            min($this->cabeceraFirstDataRow(), $this->detalleFirstDataRow()),
+            count(self::CABECERAS_DETALLE)
+        );
         try {
-            $reader = IOFactory::createReaderForFile($sanitizedPath);
+            $reader = IOFactory::createReaderForFile($loadPath);
             $reader->setReadDataOnly(false);
             $reader->setReadEmptyCells(false);
             $reader->setIncludeCharts(false);
             if (method_exists($reader, 'setIgnoreRowsWithNoCells')) {
                 $reader->setIgnoreRowsWithNoCells(true);
             }
-            $spreadsheet = $reader->load($sanitizedPath);
-        } finally {
-            if (is_file($sanitizedPath)) {
-                @unlink($sanitizedPath);
-            }
+            $spreadsheet = $reader->load($loadPath);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException('No se pudo cargar plantilla KARDEX GENERAL: '.$e->getMessage(), 0, $e);
         }
 
         $sheetCabecera = $spreadsheet->getSheetByName(self::HOJA_CABECERA);
