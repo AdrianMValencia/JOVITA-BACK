@@ -12,6 +12,7 @@ use App\Models\Productos;
 use App\Models\EfactLog;
 use App\Services\EfactCorrelativoCpeService;
 use App\Services\EfactOseService;
+use App\Services\EfactPdfPostProcessor;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -641,7 +642,14 @@ class ComprobantesController extends Controller
             ], $result['status'] ?? 500);
         }
 
-        return response($result['content'], 200, [
+        $contenido = $result['content'];
+        if (is_string($contenido) && $contenido !== '') {
+            /** @var EfactPdfPostProcessor $pdfPost */
+            $pdfPost = app(EfactPdfPostProcessor::class);
+            $contenido = $pdfPost->personalizarContenidoPdf($contenido);
+        }
+
+        return response($contenido, 200, [
             'Content-Type' => $result['mime'] ?? 'application/pdf',
             'Content-Disposition' => 'attachment; filename="' . ($result['filename'] ?? ('pdf-' . $comprobante->efact_ticket . '.pdf')) . '"',
         ]);

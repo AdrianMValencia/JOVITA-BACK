@@ -7,6 +7,7 @@ use App\Models\ComprobantesDetalles;
 use App\Models\Monedas;
 use App\Models\Productos;
 use App\Models\Recibos;
+
 /**
  * Reconstruye el array de parámetros que espera JsonUblService::generarJson
  * a partir de un recibo o comprobante ya guardado (emisión / reintento / lote).
@@ -15,11 +16,12 @@ class EfactEmisionParamsBuilder
 {
     public function __construct(
         private readonly ComprobanteIgvService $igvService,
+        private readonly EfactEmisionContextEnricher $contextEnricher,
     ) {}
 
     public function desdeRecibo(Recibos $r): array
     {
-        $r->loadMissing(['detalles.productos', 'clientes', 'monedas']);
+        $r->loadMissing(['detalles.productos', 'clientes.tipodoi', 'monedas']);
 
         $detalles = [];
         foreach ($r->detalles as $d) {
@@ -38,7 +40,7 @@ class EfactEmisionParamsBuilder
             $detalles[] = $det;
         }
 
-        return $this->igvService->aplicarIgvAParams([
+        return $this->contextEnricher->enriquecer($this->igvService->aplicarIgvAParams([
             'idPuntoVenta'       => $r->idPuntoVenta,
             'puntoventa'         => $r->puntoventa,
             'tipoComprobante'    => $this->inferTipoComprobanteDesdeSerie((string) ($r->series ?? '')),
@@ -46,16 +48,18 @@ class EfactEmisionParamsBuilder
             'numeroComprobante'  => $r->numeracion,
             'fechaEmision'       => $r->fechaEmision,
             'documento'          => $r->documento,
+            'numeroDocumento'    => $r->documento,
             'cliente'            => $r->razonSocial,
             'razonSocial'        => $r->razonSocial,
             'correo'             => $r->correo,
+            'vendedor'           => $r->vendedor,
             'totalGravada'       => (float) ($r->totalGravada ?? 0),
             'totalIgv'           => (float) ($r->totalIgv ?? 0),
             'total'              => (float) ($r->total ?? 0),
             'moneda'             => $r->moneda,
             'tipoCambio'         => (float) ($r->tipoCambio ?? 1),
             'detalles'           => $detalles,
-        ]);
+        ]), $r->clientes);
     }
 
     public function desdeComprobante(Comprobantes $c): array
@@ -99,7 +103,7 @@ class EfactEmisionParamsBuilder
             }
         }
 
-        return $this->igvService->aplicarIgvAParams([
+        return $this->contextEnricher->enriquecer($this->igvService->aplicarIgvAParams([
             'idPuntoVenta'       => $c->idPuntoVenta,
             'puntoVenta'         => $c->puntoVenta,
             'tipoComprobante'    => (string) $tipoNombre,
@@ -107,6 +111,7 @@ class EfactEmisionParamsBuilder
             'numeroComprobante'  => $numero,
             'fechaEmision'       => $c->fecha,
             'documento'          => $c->codigo,
+            'numeroDocumento'    => $c->codigo,
             'cliente'            => $c->cliente,
             'razonSocial'        => $c->cliente,
             'correo'             => $c->correo,
@@ -117,7 +122,7 @@ class EfactEmisionParamsBuilder
             'moneda'             => $monedaSigla,
             'tipoCambio'         => (float) ($c->tipoCambio ?? 1),
             'detalles'           => $detalles,
-        ]);
+        ]));
     }
 
     /**

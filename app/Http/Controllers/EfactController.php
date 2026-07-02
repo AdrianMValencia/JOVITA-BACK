@@ -10,6 +10,8 @@ use App\Services\EfactEmisionParamsBuilder;
 use App\Services\EfactEstadoNormalizer;
 use App\Services\EfactEstadoSincronizadorService;
 use App\Services\EfactOseService;
+use App\Services\EfactPdfPostProcessor;
+use App\Services\EfactRepresentacionImpresaPdfService;
 use App\Services\JsonUblService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
@@ -54,6 +56,10 @@ class EfactController extends Controller
         $page = isset($filters['page']) ? max(1, (int) $filters['page']) : 1;
         $pageSize = isset($filters['pageSize']) ? max(1, min(200, (int) $filters['pageSize'])) : 15;
         $estado = strtolower((string) ($filters['estado'] ?? 'todos'));
+        $modoListado = strtolower((string) ($filters['modoListado'] ?? 'emitidos'));
+        if (! in_array($modoListado, ['emitidos', 'pendientes'], true)) {
+            $modoListado = 'emitidos';
+        }
         $origen = strtolower((string) ($filters['origen'] ?? 'todos'));
 
         $idPv = $filters['idPuntoVenta'] ?? null;
@@ -255,6 +261,8 @@ class EfactController extends Controller
             unset($row['_efact_ticket_raw'], $row['_efact_estado_raw'], $row['_efact_ose'], $row['_efact_sunat']);
             $row = array_merge($row, $norm);
             $this->adjuntarComprobanteElectronicoDesdeColumnas($row);
+            $this->intentarCompletarCpeDesdeTicketLog($row);
+            $this->normalizarFlagsPorModoListado($row);
         }
         unset($row);
 
@@ -262,6 +270,12 @@ class EfactController extends Controller
         // mostrar una sola fila consolidada en el listado.
         $merged = $this->compactarEmisionesMasivasPorTicket($merged);
 
+        foreach ($merged as &$row) {
+            $this->normalizarFlagsPorModoListado($row);
+        }
+        unset($row);
+
+        $merged = array_values(array_filter($merged, fn ($row) => $this->pasaFiltroModoListado($row, $modoListado)));
         $merged = array_values(array_filter($merged, fn ($row) => $this->pasaFiltroEstadoLista($row, $estado)));
 
         usort($merged, function ($a, $b) {
@@ -289,7 +303,8 @@ class EfactController extends Controller
             'total' => $total,
             'page' => $page,
             'pageSize' => $pageSize,
-            'nota' => 'ticket_pos = correlativo interno POS. cpe_sunat = CPE SUNAT. efact_ticket / ose_ticket / ticket_ose / efactTicket = UUID OSE (mismo valor). PDF/XML/CDR: ?ticket|efact_ticket|efactTicket=UUID o ?origen=recibo|comprobante&id=… (solo ticket persistido o log, sin inferir por POS). sincronizar-estados: POST /api/efact/sincronizar-estados. Filtros estado: pendiente | completado | proceso | todos.',
+            'modoListado' => $modoListado,
+            'nota' => 'ticket_pos = correlativo interno POS. cpe_sunat = CPE SUNAT. efact_ticket / ose_ticket / ticket_ose / efactTicket = UUID OSE (mismo valor). PDF/XML/CDR: ?ticket|efact_ticket|efactTicket=UUID o ?origen=recibo|comprobante&id=… (solo ticket persistido o log, sin inferir por POS). sincronizar-estados: POST /api/efact/sincronizar-estados. Filtros estado: pendiente | completado | proceso | todos. modoListado: emitidos | pendientes.',
             'status' => 200,
         ], 200);
     }
@@ -494,6 +509,122 @@ class EfactController extends Controller
             'proceso', 'en_proceso', 'con_ticket' => $ticket !== '' && $pendiente,
             default => true,
         };
+    }
+
+    /**
+     * Filtro explícito de listado:
+     * - emitidos: ticket POS válido + CPE SUNAT válido
+     * - pendientes: ticket POS válido + sin CPE SUNAT
+     *
+     * @param  array<string,mixed>  $row
+     */
+    private function pasaFiltroModoListado(array $row, string $modoListado): bool
+    {
+        $modoListado = strtolower(trim($modoListado));
+        if ($modoListado === '') {
+            $modoListado = 'emitidos';
+        }
+
+        $tieneTicketPos = $this->tieneTicketPosValido($row);
+        $tieneCpeSunat = $this->tieneCpeSunatValido($row);
+
+        return match ($modoListado) {
+            'pendientes' => $tieneTicketPos && ! $tieneCpeSunat,
+            default => $tieneTicketPos && $tieneCpeSunat,
+        };
+    }
+
+    /**
+     * @param  array<string,mixed>  $row
+     */
+    private function normalizarFlagsPorModoListado(array &$row): void
+    {
+        $tieneTicketPos = $this->tieneTicketPosValido($row);
+        $tieneCpeSunat = $this->tieneCpeSunatValido($row);
+
+        $row['pendiente_emision'] = $tieneTicketPos && ! $tieneCpeSunat;
+        $row['seleccionable'] = (bool) $row['pendiente_emision'];
+    }
+
+    /**
+     * Si el registro tiene ticket OSE pero no CPE persistido en columnas, intenta reconstruirlo
+     * desde tbl_efact_logs (campos lote/serie_emitida/numero_emitido).
+     *
+     * @param  array<string,mixed>  $row
+     */
+    private function intentarCompletarCpeDesdeTicketLog(array &$row): void
+    {
+        if ($this->tieneCpeSunatValido($row)) {
+            return;
+        }
+
+        $ticket = trim((string) ($row['efact_ticket'] ?? ''));
+        if ($ticket === '') {
+            return;
+        }
+
+        $emitido = $this->resolverComprobanteEmitidoMasivoPorTicket($ticket);
+        if ($emitido === null) {
+            return;
+        }
+
+        $row['efact_comprobante_serie'] = $emitido['serie'];
+        $row['efact_comprobante_numero'] = $emitido['numero'];
+        $row['comprobante_emitido'] = $emitido['comprobante'];
+        $row['comprobante_electronico'] = [
+            'serie' => $emitido['serie'],
+            'numero' => $emitido['numero'],
+            'comprobante' => $emitido['comprobante'],
+        ];
+    }
+
+    /**
+     * @param  array<string,mixed>  $row
+     */
+    private function tieneTicketPosValido(array $row): bool
+    {
+        $ticketPos = $row['ticket_pos'] ?? null;
+        if (is_array($ticketPos)) {
+            $texto = trim((string) ($ticketPos['texto'] ?? ''));
+            if ($texto !== '') {
+                return true;
+            }
+        }
+
+        $enumeracion = trim((string) ($row['enumeracion_ticket'] ?? ''));
+        if ($enumeracion !== '') {
+            return true;
+        }
+
+        $serie = trim((string) ($row['serie_ticket'] ?? $row['serie'] ?? ''));
+        $numero = trim((string) ($row['numero_ticket'] ?? $row['numero'] ?? ''));
+
+        return $serie !== '' || $numero !== '';
+    }
+
+    /**
+     * @param  array<string,mixed>  $row
+     */
+    private function tieneCpeSunatValido(array $row): bool
+    {
+        $emitido = trim((string) ($row['comprobante_emitido'] ?? ''));
+        if ($emitido !== '') {
+            return true;
+        }
+
+        $cpe = $row['comprobante_electronico'] ?? $row['cpe_sunat'] ?? null;
+        if (is_array($cpe)) {
+            $serie = trim((string) ($cpe['serie'] ?? ''));
+            $numero = trim((string) ($cpe['numero'] ?? ''));
+            if ($serie !== '' && $numero !== '') {
+                return true;
+            }
+        }
+
+        $serie = trim((string) ($row['efact_comprobante_serie'] ?? ''));
+        $numero = trim((string) ($row['efact_comprobante_numero'] ?? ''));
+
+        return $serie !== '' && $numero !== '';
     }
 
     private function etiquetaTipoComprobante(Comprobantes $c): ?string
@@ -907,7 +1038,7 @@ class EfactController extends Controller
             return $this->jsonSinTicketEfact($request);
         }
 
-        return $this->entregarArchivoEfact($ticket, 'pdf', false);
+        return $this->entregarArchivoEfact($ticket, 'pdf', false, $request);
     }
 
     /**
@@ -1011,12 +1142,28 @@ class EfactController extends Controller
     /**
      * @return \Illuminate\Http\Response|\Illuminate\Http\JsonResponse
      */
-    private function entregarArchivoEfact(string $ticket, string $tipo, bool $registrarLogCdr)
-    {
+    private function entregarArchivoEfact(
+        string $ticket,
+        string $tipo,
+        bool $registrarLogCdr,
+        ?Request $request = null
+    ) {
         $ticket = $this->normalizarTicketEfact($ticket) ?? trim($ticket);
         if ($ticket === '') {
             return response()->json(['message' => 'ticket inválido'], 422);
         }
+
+        $defaultName = match ($tipo) {
+            'cdr' => 'cdr-' . $ticket . '.xml',
+            'xml' => 'xml-' . $ticket . '.xml',
+            'pdf' => 'pdf-' . $ticket . '.pdf',
+            default => 'archivo',
+        };
+        $mimeDefault = match ($tipo) {
+            'cdr', 'xml' => 'application/xml',
+            'pdf' => 'application/pdf',
+            default => 'application/octet-stream',
+        };
 
         /** @var EfactOseService $efact */
         $efact = app(EfactOseService::class);
@@ -1063,19 +1210,14 @@ class EfactController extends Controller
             }
         }
 
-        $defaultName = match ($tipo) {
-            'cdr' => 'cdr-' . $ticket . '.xml',
-            'xml' => 'xml-' . $ticket . '.xml',
-            'pdf' => 'pdf-' . $ticket . '.pdf',
-            default => 'archivo',
-        };
-        $mimeDefault = match ($tipo) {
-            'cdr', 'xml' => 'application/xml',
-            'pdf' => 'application/pdf',
-            default => 'application/octet-stream',
-        };
+        $contenido = $result['content'];
+        if ($tipo === 'pdf' && is_string($contenido) && $contenido !== '') {
+            /** @var EfactPdfPostProcessor $pdfPost */
+            $pdfPost = app(EfactPdfPostProcessor::class);
+            $contenido = $pdfPost->personalizarContenidoPdf($contenido);
+        }
 
-        return response($result['content'], 200, [
+        return response($contenido, 200, [
             'Content-Type' => $result['mime'] ?? $mimeDefault,
             'Content-Disposition' => 'attachment; filename="' . ($result['filename'] ?? $defaultName) . '"',
         ]);
@@ -1267,6 +1409,10 @@ class EfactController extends Controller
         }
 
         $reintentar = filter_var($request->input('reintentar', false), FILTER_VALIDATE_BOOLEAN);
+        $agruparEnUnComprobante = filter_var(
+            $request->input('agrupar_en_un_comprobante', $request->input('un_solo_comprobante', false)),
+            FILTER_VALIDATE_BOOLEAN
+        );
 
         /** @var EfactEmisionParamsBuilder $builder */
         $builder = app(EfactEmisionParamsBuilder::class);
@@ -1277,6 +1423,8 @@ class EfactController extends Controller
 
         $resultados = [];
         $emitibles = [];
+        $comprobanteAgrupado = null;
+        $ticketsAgrupados = [];
 
         foreach ($items as $idx => $item) {
             if (! is_array($item)) {
@@ -1407,6 +1555,19 @@ class EfactController extends Controller
                     $cpeSerieU = strtoupper(trim((string) $serie));
                     $cpeNumPad = str_pad((string) $numeroEmitido, 8, '0', STR_PAD_LEFT);
 
+                    if ($agruparEnUnComprobante && count($emitibles) > 1 && $ok) {
+                        $comprobanteAgrupado = [
+                            'serie' => $cpeSerieU,
+                            'numero' => $cpeNumPad,
+                            'comprobante' => $cpeSerieU . '-' . $cpeNumPad,
+                            'efact_ticket' => $ticket,
+                        ];
+                        $ticketsAgrupados = array_values(array_map(
+                            fn ($it) => ['origen' => $it['origen'], 'id' => $it['id']],
+                            $emitibles
+                        ));
+                    }
+
                     foreach ($emitibles as $row) {
                         if ($row['origen'] === 'recibo') {
                             /** @var Recibos $reg */
@@ -1515,6 +1676,8 @@ class EfactController extends Controller
                 'total' => count($resultados),
                 'errores' => count($fallos),
             ],
+            'comprobante_agrupado' => $comprobanteAgrupado,
+            'tickets_agrupados' => $ticketsAgrupados,
             'mensaje' => 'Se genera un único comprobante electrónico por todo el lote seleccionable y se comparte el mismo ticket en los ítems procesados.',
             'status' => 200,
         ], 200);
@@ -1573,5 +1736,40 @@ class EfactController extends Controller
         }
 
         $base->update($payload);
+    }
+
+    private function generarPdfRepresentacionLocal(
+        EfactRepresentacionImpresaPdfService $representacionPdf,
+        string $ticket,
+        ?Request $request = null
+    ): ?string {
+        if ($request !== null) {
+            $origen = strtolower((string) $request->query('origen', ''));
+            $id = (int) $request->query('id', 0);
+            if ($origen === 'recibo' && $id > 0) {
+                $pdf = $representacionPdf->generarPorReciboId($id);
+                if (is_string($pdf) && $pdf !== '') {
+                    return $pdf;
+                }
+            }
+            if ($origen === 'comprobante' && $id > 0) {
+                $pdf = $representacionPdf->generarPorComprobanteId($id);
+                if (is_string($pdf) && $pdf !== '') {
+                    return $pdf;
+                }
+            }
+        }
+
+        $recibo = $representacionPdf->buscarReciboPorTicket($ticket);
+        if ($recibo !== null) {
+            return $representacionPdf->generarDesdeRecibo($recibo);
+        }
+
+        $comprobante = $representacionPdf->buscarComprobantePorTicket($ticket);
+        if ($comprobante !== null) {
+            return $representacionPdf->generarDesdeComprobante($comprobante);
+        }
+
+        return null;
     }
 }

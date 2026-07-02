@@ -8,6 +8,11 @@ use Luecano\NumeroALetras\NumeroALetras;
 
 class JsonUblService
 {
+    public function __construct(
+        private readonly EfactEmisionContextEnricher $contextEnricher,
+    ) {
+    }
+
     /**
      * Genera una estructura JSON+ básica para boleta/factura.
      *
@@ -18,8 +23,10 @@ class JsonUblService
         /** @var ComprobanteIgvService $igvService */
         $igvService = app(ComprobanteIgvService::class);
         $params = $igvService->aplicarIgvAParams($params);
+        $params = $this->contextEnricher->enriquecer($params);
 
-        $empresa = DatosEmpresa::first();
+        $idPv = isset($params['idPuntoVenta']) ? (int) $params['idPuntoVenta'] : null;
+        $empresa = $this->contextEnricher->resolverDatosEmpresa($idPv);
         if (! $empresa || empty($empresa->ruc)) {
             return [
                 'success' => false,
@@ -110,9 +117,7 @@ class JsonUblService
             $tipoDocCliente = '6';
             $numeroDocCliente = $rucFactura;
         } else {
-            $docRaw = (string) ($params['documento'] ?? ($params['numeroDocumento'] ?? '00000000'));
-            $tipoDocCliente = $this->resolverTipoDocCliente($docRaw, $tipoDoc);
-            $numeroDocCliente = $docRaw;
+            [$tipoDocCliente, $numeroDocCliente] = $this->resolverIdentificacionClienteBoleta($params, $tipoDoc);
         }
 
         $formatter = new NumeroALetras();
@@ -123,18 +128,27 @@ class JsonUblService
         $correlativoPad = $this->correlativoPad8(max(1, $numero));
         $idComprobante = $serieNorm . '-' . $correlativoPad;
 
+        $notes = [[
+            '_' => $totalEnLetras,
+            'languageLocaleID' => '1000',
+        ]];
+        $nombreVendedor = trim((string) ($params['nombreVendedor'] ?? ($params['vendedor'] ?? '')));
+        if ($nombreVendedor !== '') {
+            $notes[] = [
+                '_' => 'Vendedor: ' . $nombreVendedor,
+            ];
+        }
+
         $invoiceRoot = array_merge(
             [
                 'UBLVersionID' => [['_'=> '2.1']],
                 'CustomizationID' => [['_'=> '2.0']],
                 'ID' => [['_'=> $idComprobante]],
                 'IssueDate' => [['_'=> $fecha]],
-            ],
-            $tipoDoc === '01'
-                ? ['IssueTime' => [[
+                'IssueTime' => [[
                     '_' => $params['issueTime'] ?? date('H:i:s'),
-                ]]]
-                : [],
+                ]],
+            ],
             [
                 'InvoiceTypeCode' => [[
                     '_' => $tipoDoc,
@@ -145,10 +159,7 @@ class JsonUblService
                     'listURI' => 'urn:pe:gob:sunat:cpe:see:gem:catalogos:catalogo01',
                     'listAgencyName' => 'PE:SUNAT',
                 ]],
-                'Note' => [[
-                    '_' => $totalEnLetras,
-                    'languageLocaleID' => '1000',
-                ]],
+                'Note' => $notes,
                 'DocumentCurrencyCode' => [[
                     '_' => $moneda,
                     'listID' => 'ISO 4217 Alpha',
@@ -176,6 +187,10 @@ class JsonUblService
                 'AccountingCustomerParty' => $this->accountingCustomerParty($tipoDoc, $params, $numeroDocCliente, $tipoDocCliente),
             ]
         );
+
+        if ($nombreVendedor !== '') {
+            $invoiceRoot['SellerSupplierParty'] = $this->sellerSupplierParty($nombreVendedor);
+        }
 
         if ($tipoDoc === '01') {
             $invoiceRoot['PaymentTerms'] = [[
@@ -637,7 +652,7 @@ class JsonUblService
         $codigoLocal = $this->normalizarCodigoLocalAnexo(
             (string) ($params['codigoEstablecimiento'] ?? $params['codigoLocalAnexo'] ?? '0000')
         );
-        $linea = (string) ($empresa->direccion ?? $params['direccionEmisor'] ?? 'SIN DOMICILIO FISCAL');
+        $linea = (string) ($params['direccionEmisor'] ?? $empresa->direccion ?? 'SIN DOMICILIO FISCAL');
         $distrito = (string) ($params['distritoEmisor'] ?? $empresa->distrito ?? 'LIMA');
         $provincia = (string) ($params['provinciaEmisor'] ?? $empresa->provincia ?? 'LIMA');
         $departamento = (string) ($params['departamentoEmisor'] ?? $empresa->departamento ?? 'LIMA');
@@ -811,6 +826,66 @@ class JsonUblService
         }
 
         return '03';
+    }
+
+    /**
+     * @return array{0: string, 1: string} [schemeID, numero]
+     */
+    private function resolverIdentificacionClienteBoleta(array $params, string $tipoComprobante): array
+    {
+        $candidatos = [
+            $params['numeroDocumento'] ?? null,
+            $params['numeroDoi'] ?? null,
+            $params['documento'] ?? null,
+        ];
+
+        $numeroDoc = '';
+        foreach ($candidatos as $candidato) {
+            if ($candidato === null || $candidato === '' || $candidato === '-') {
+                continue;
+            }
+            $digitos = preg_replace('/\D/', '', (string) $candidato);
+            if ($digitos === '' || strlen($digitos) < 8) {
+                continue;
+            }
+            if (strlen($digitos) > strlen($numeroDoc)) {
+                $numeroDoc = $digitos;
+            }
+        }
+
+        if ($numeroDoc === '') {
+            return ['0', '00000000'];
+        }
+
+        if (strlen($numeroDoc) === 11) {
+            return ['6', $numeroDoc];
+        }
+
+        if (strlen($numeroDoc) > 8) {
+            $numeroDoc = substr($numeroDoc, 0, 8);
+        } elseif (strlen($numeroDoc) < 8) {
+            $numeroDoc = str_pad($numeroDoc, 8, '0', STR_PAD_LEFT);
+        }
+
+        $tipoExplicito = trim((string) ($params['tipoDocumentoCliente'] ?? ($params['tipoDocumento'] ?? '')));
+        if ($tipoExplicito !== '' && preg_match('/^\d+$/', $tipoExplicito)) {
+            return [$tipoExplicito, $numeroDoc];
+        }
+
+        return [$this->resolverTipoDocCliente($numeroDoc, $tipoComprobante), $numeroDoc];
+    }
+
+    private function sellerSupplierParty(string $nombreVendedor): array
+    {
+        return [[
+            'Party' => [[
+                'PartyName' => [[
+                    'Name' => [[
+                        '_' => 'Vendedor: ' . $nombreVendedor,
+                    ]],
+                ]],
+            ]],
+        ]];
     }
 
     private function resolverTipoDocCliente(string $numero, string $tipoComprobante): string

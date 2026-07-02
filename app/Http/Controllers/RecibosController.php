@@ -15,6 +15,7 @@ use App\Models\SeriesTickets;
 use App\Models\Monedas;
 use App\Models\Clientes;
 use App\Models\Cajas;
+use App\Models\TipoDoi;
 use App\Models\EfactLog;
 use App\Models\Comprobantes;
 use App\Models\ComprobantesDetalles;
@@ -39,6 +40,7 @@ use App\Services\EfactOseService;
 use App\Services\JsonUblService;
 use App\Services\EfactReciboVisorEnrichment;
 use App\Services\EfactCorrelativoCpeService;
+use App\Services\EfactEmisionContextEnricher;
 
 class RecibosController extends Controller
 {
@@ -174,7 +176,7 @@ class RecibosController extends Controller
         $cpeDesdeParams = $this->extraerSerieNumeroCpeEfact($params);
 
         $monedas = Monedas::where('idPuntoVenta', $params['idPuntoVenta'] ?? null)->orderBy('id', 'asc')->first();
-        $clientes = Clientes::first();
+        $clientes = $this->resolverORegistrarClienteRecibo($params);
         $usuario = auth()->user();
 
         $emitirEfact = filter_var($params['emitirEfact'] ?? false, FILTER_VALIDATE_BOOLEAN);
@@ -224,6 +226,11 @@ class RecibosController extends Controller
                 || ! empty($documentoEfact['base64']);
 
             if (! $tieneDocumento) {
+                /** @var EfactEmisionContextEnricher $contextEnricher */
+                $contextEnricher = app(EfactEmisionContextEnricher::class);
+                $params['issueTime'] = now()->format('H:i:s');
+                $params = $contextEnricher->enriquecer($params, $clientes, $usuario);
+
                 /** @var JsonUblService $jsonService */
                 $jsonService = app(JsonUblService::class);
                 $jsonResult  = $jsonService->generarJson(
@@ -307,10 +314,10 @@ class RecibosController extends Controller
             $recibos = new Recibos();
             $recibos->idPuntoVenta = $params['idPuntoVenta'] ?? null;
             $recibos->puntoventa = $params['puntoventa'] ?? null;
-            $recibos->idCliente = $clientes->id ?? null;
+            $recibos->idCliente = $clientes->id;
             $recibos->documento = $clientes->numeroDoi ?? ($params['numeroDocumento'] ?? ($params['documento'] ?? null));
             $recibos->razonSocial = $clientes->nombre ?? ($params['cliente'] ?? ($params['razonSocial'] ?? null));
-            $recibos->correo = $clientes->correo ?? ($params['correo'] ?? null);
+            $recibos->correo = trim((string) ($clientes->correo ?? ($params['correo'] ?? '')));
             $recibos->idUsuario = $usuario->id;
             $recibos->vendedor = $usuario->nombre;
             $recibos->idSeries = $seriesTickets->id;
@@ -320,8 +327,8 @@ class RecibosController extends Controller
             $recibos->idMoneda = $monedas->id ?? null;
             $recibos->moneda = $monedas->abreviatura ?? null;
             $recibos->tipoCambio = $params['tipoCambio'] ?? 1;
-            $recibos->porcentajeDesc = $params['porcentajeDesc'] ?? null;
-            $recibos->montoDesc = $params['montoDesc'] ?? null;
+            $recibos->porcentajeDesc = $params['porcentajeDesc'] ?? 0;
+            $recibos->montoDesc = $params['montoDesc'] ?? 0;
             $recibos->totalGravada = $params['totalGravada'] ?? null;
             $recibos->totalIgv = $params['totalIgv'] ?? null;
             $recibos->otrosCargo = $params['otrosCargo'] ?? null;
@@ -1013,5 +1020,125 @@ class RecibosController extends Controller
         $numInt = max(1, (int) preg_replace('/\D+/', '', (string) $num));
 
         return ['serie' => $serieNorm, 'numero_int' => $numInt];
+    }
+
+    /**
+     * Busca al cliente del recibo; si no existe en BD lo registra con los datos del POS.
+     *
+     * @param  array<string, mixed>  $params
+     */
+    private function resolverORegistrarClienteRecibo(array $params): Clientes
+    {
+        $cliente = $this->buscarClienteRecibo($params);
+        if ($cliente !== null) {
+            return $cliente;
+        }
+
+        $numeroDoi = $this->extraerNumeroDocumentoCliente($params);
+        $nombre = trim((string) ($params['cliente'] ?? ($params['razonSocial'] ?? '')));
+        $idPv = isset($params['idPuntoVenta']) ? (int) $params['idPuntoVenta'] : null;
+
+        if ($numeroDoi !== '' || $nombre !== '') {
+            $cliente = new Clientes();
+            $cliente->idPuntoVenta = $idPv;
+            $cliente->idTipoDoi = $this->resolverIdTipoDoiRecibo($params, $numeroDoi);
+            $cliente->numeroDoi = $numeroDoi !== '' ? $numeroDoi : '00000000';
+            $cliente->nombre = $nombre !== '' ? $nombre : 'CLIENTE';
+            $cliente->direccion = $params['direccion'] ?? '';
+            $cliente->idUbigeo = $params['idUbigeo'] ?? 1250;
+            $cliente->correo = trim((string) ($params['correo'] ?? ''));
+            $cliente->celular = $params['celular'] ?? '';
+            $cliente->telefono = $params['telefono'] ?? '';
+            $cliente->status = 1;
+            $cliente->save();
+            $cliente->load('tipodoi');
+
+            return $cliente;
+        }
+
+        $fallback = Clientes::with('tipodoi')->orderBy('id')->first();
+        if ($fallback !== null) {
+            return $fallback;
+        }
+
+        $cliente = new Clientes();
+        $cliente->idPuntoVenta = $idPv;
+        $cliente->idTipoDoi = $this->resolverIdTipoDoiRecibo($params, '00000000');
+        $cliente->numeroDoi = '00000000';
+        $cliente->nombre = 'CLIENTE';
+        $cliente->idUbigeo = 1250;
+        $cliente->correo = '';
+        $cliente->status = 1;
+        $cliente->save();
+        $cliente->load('tipodoi');
+
+        return $cliente;
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    private function buscarClienteRecibo(array $params): ?Clientes
+    {
+        if (! empty($params['idCliente'])) {
+            $cliente = Clientes::with('tipodoi')->find((int) $params['idCliente']);
+            if ($cliente !== null) {
+                return $cliente;
+            }
+        }
+
+        $numeroDoi = $this->extraerNumeroDocumentoCliente($params);
+        if ($numeroDoi !== '') {
+            $cliente = Clientes::with('tipodoi')->where('numeroDoi', $numeroDoi)->first();
+            if ($cliente !== null) {
+                return $cliente;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    private function extraerNumeroDocumentoCliente(array $params): string
+    {
+        foreach (['numeroDocumento', 'numeroDoi'] as $campo) {
+            $digitos = preg_replace('/\D/', '', (string) ($params[$campo] ?? ''));
+            if (strlen($digitos) >= 8) {
+                return $digitos;
+            }
+        }
+
+        $documento = preg_replace('/\D/', '', (string) ($params['documento'] ?? ''));
+        if (strlen($documento) >= 8) {
+            return $documento;
+        }
+
+        return '';
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     */
+    private function resolverIdTipoDoiRecibo(array $params, string $numeroDoi): ?int
+    {
+        $tipoCodigo = trim((string) ($params['tipoDocumento'] ?? ($params['tipoDocumentoCliente'] ?? '')));
+        if ($tipoCodigo !== '' && preg_match('/^\d+$/', $tipoCodigo)) {
+            $tipo = TipoDoi::where('codigo', $tipoCodigo)->first();
+            if ($tipo !== null) {
+                return (int) $tipo->id;
+            }
+        }
+
+        if (strlen($numeroDoi) === 11) {
+            $tipo = TipoDoi::where('codigo', '6')->first();
+
+            return $tipo !== null ? (int) $tipo->id : null;
+        }
+
+        $tipo = TipoDoi::where('codigo', '1')->first();
+
+        return $tipo !== null ? (int) $tipo->id : null;
     }
 }

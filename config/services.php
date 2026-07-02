@@ -48,6 +48,8 @@ return [
         'username_test'      => env('EFACT_USERNAME_TEST'),
         'password_test'      => env('EFACT_PASSWORD_TEST'),
         'bearer_token_test'  => env('EFACT_BEARER_TOKEN_TEST'),
+        // URL web del proveedor OSE para la leyenda del PDF (reemplaza www.sunat.gob.pe).
+        'web_url'            => env('EFACT_WEB_URL', 'www.efact.pe'),
     ],
 
 ];
