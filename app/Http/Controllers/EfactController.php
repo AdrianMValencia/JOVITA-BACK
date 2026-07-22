@@ -266,6 +266,10 @@ class EfactController extends Controller
         }
         unset($row);
 
+        if ($modoListado === 'emitidos') {
+            $merged = $this->deduplicarEmitidosPorCpeSunat($merged);
+        }
+
         // Cuando la emisión masiva comparte un solo ticket para múltiples ítems,
         // mostrar una sola fila consolidada en el listado.
         $merged = $this->compactarEmisionesMasivasPorTicket($merged);
@@ -526,7 +530,7 @@ class EfactController extends Controller
         }
 
         $tieneTicketPos = $this->tieneTicketPosValido($row);
-        $tieneCpeSunat = $this->tieneCpeSunatValido($row);
+        $tieneCpeSunat = $this->cuentaComoCpeSunatEmitido($row);
 
         return match ($modoListado) {
             'pendientes' => $tieneTicketPos && ! $tieneCpeSunat,
@@ -535,12 +539,89 @@ class EfactController extends Controller
     }
 
     /**
+     * En emitidos, si el mismo CPE SUNAT existe como recibo y comprobante, deja solo el comprobante.
+     *
+     * @param  array<int,array<string,mixed>>  $rows
+     * @return array<int,array<string,mixed>>
+     */
+    private function deduplicarEmitidosPorCpeSunat(array $rows): array
+    {
+        $cpesComprobante = [];
+        foreach ($rows as $row) {
+            if (($row['origen'] ?? '') !== 'comprobante') {
+                continue;
+            }
+            $key = $this->claveCpeSunatFila($row);
+            if ($key !== '') {
+                $cpesComprobante[$key] = true;
+            }
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            if (($row['origen'] ?? '') === 'recibo') {
+                $key = $this->claveCpeSunatFila($row);
+                if ($key !== '' && isset($cpesComprobante[$key])) {
+                    continue;
+                }
+            }
+            $out[] = $row;
+        }
+
+        return $out;
+    }
+
+    /**
+     * @param  array<string,mixed>  $row
+     */
+    private function claveCpeSunatFila(array $row): string
+    {
+        $serie = strtoupper(trim((string) ($row['efact_comprobante_serie'] ?? '')));
+        $numero = trim((string) ($row['efact_comprobante_numero'] ?? ''));
+        if ($serie === '' || $numero === '') {
+            $emitido = trim((string) ($row['comprobante_emitido'] ?? ''));
+            if ($emitido !== '' && str_contains($emitido, '-')) {
+                [$serie, $numero] = array_pad(explode('-', $emitido, 2), 2, '');
+                $serie = strtoupper(trim($serie));
+                $numero = trim($numero);
+            }
+        }
+        if ($serie === '' || $numero === '') {
+            return '';
+        }
+
+        return $serie . '|' . ltrim($numero, '0');
+    }
+
+    /**
+     * CPE válido para listado emitidos: excluye ventas < S/5 con número reservado sin envío OSE.
+     *
+     * @param  array<string,mixed>  $row
+     */
+    private function cuentaComoCpeSunatEmitido(array $row): bool
+    {
+        if (! $this->tieneCpeSunatValido($row)) {
+            return false;
+        }
+
+        $total = (float) ($row['total'] ?? 0);
+        $ticket = trim((string) ($row['efact_ticket'] ?? ''));
+        $estado = strtoupper(trim((string) ($row['efact_estado'] ?? ($row['_efact_estado_raw'] ?? ''))));
+
+        if ($total > 0 && $total < 5 && $ticket === '' && in_array($estado, ['NO_ENVIADO', '', 'ERROR'], true)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
      * @param  array<string,mixed>  $row
      */
     private function normalizarFlagsPorModoListado(array &$row): void
     {
         $tieneTicketPos = $this->tieneTicketPosValido($row);
-        $tieneCpeSunat = $this->tieneCpeSunatValido($row);
+        $tieneCpeSunat = $this->cuentaComoCpeSunatEmitido($row);
 
         $row['pendiente_emision'] = $tieneTicketPos && ! $tieneCpeSunat;
         $row['seleccionable'] = (bool) $row['pendiente_emision'];

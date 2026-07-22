@@ -173,13 +173,18 @@ class RecibosController extends Controller
             $numeracionPos = max(1, (int) preg_replace('/\D+/', '', (string) $params['numeracion']));
         }
 
-        $cpeDesdeParams = $this->extraerSerieNumeroCpeEfact($params);
-
         $monedas = Monedas::where('idPuntoVenta', $params['idPuntoVenta'] ?? null)->orderBy('id', 'asc')->first();
         $clientes = $this->resolverORegistrarClienteRecibo($params);
         $usuario = auth()->user();
 
         $emitirEfact = filter_var($params['emitirEfact'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $totalVenta = (float) ($params['total'] ?? 0);
+        // Ventas menores a S/ 5 no generan CPE ni consumen correlativo SUNAT.
+        if ($totalVenta > 0 && $totalVenta < 5) {
+            $emitirEfact = false;
+        }
+
+        $cpeDesdeParams = $emitirEfact ? $this->extraerSerieNumeroCpeEfact($params) : null;
         $result = ['success' => false];
         $ticket = null;
         $efactEstado = 'NO_ENVIADO';
@@ -292,8 +297,11 @@ class RecibosController extends Controller
             $efactEstado = ($result['success'] ?? false) ? 'ENVIADO' : 'ERROR';
         }
 
-        // CPE persistido: explícito en body o, si no, el usado al emitir con éxito (compatibilidad).
-        $cpePersist = $cpeDesdeParams;
+        // CPE persistido solo cuando hubo emisión eFact real (nunca por campos de pantalla si no se envió).
+        $cpePersist = null;
+        if ($emitirEfact && $cpeDesdeParams !== null) {
+            $cpePersist = $cpeDesdeParams;
+        }
         if ($cpePersist === null && $emitirEfact && ($result['success'] ?? false)
             && $serieDocumento !== null && $serieDocumento !== '' && $numeroDocumento !== null) {
             $cpePersist = [
