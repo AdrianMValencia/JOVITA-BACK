@@ -100,6 +100,7 @@ class ComprasController extends Controller
         $compras->razonSocial = $params['razonSocial'] ?? null;
         $compras->idTipoDocumento = $params['idTipoDocumento'] ?? null;
         $compras->nombreTipoDocumento = $params['nombreTipoDocumento'] ?? null;
+        $compras->serieTipoDocumento = $params['serieTipoDocumento'] ?? null;
         $compras->numeroTipoDocumento = $params['numeroTipoDocumento'] ?? null;
         $compras->procedencia = $params['procedencia'] ?? null;
         $compras->totalCompras = $params['totalCompras'] ?? null;
@@ -177,6 +178,7 @@ class ComprasController extends Controller
             $compras->razonSocial = $params['razonSocial'] ?? $compras->razonSocial;
             $compras->idTipoDocumento = $params['idTipoDocumento'] ?? $compras->idTipoDocumento;
             $compras->nombreTipoDocumento = $params['nombreTipoDocumento'] ?? $compras->nombreTipoDocumento;
+            $compras->serieTipoDocumento = $params['serieTipoDocumento'] ?? $compras->serieTipoDocumento;
             $compras->numeroTipoDocumento = $params['numeroTipoDocumento'] ?? $compras->numeroTipoDocumento;
             $compras->procedencia = $params['procedencia'] ?? $compras->procedencia;
             $compras->totalCompras = $params['totalCompras'] ?? $compras->totalCompras;

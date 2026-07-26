@@ -215,7 +215,7 @@ class EfactOseService
      */
     public function obtenerCdr(string $ticket): array
     {
-        return $this->descargarArchivo("{$this->baseUrl}/v1/cdr/{$ticket}", 'cdr-' . $ticket . '.xml', 'application/xml');
+        return $this->descargarArchivo("{$this->baseUrl}/v1/cdr/{$ticket}", 'cdr-' . $ticket . '.xml', 'application/xml', 'cdr');
     }
 
     // -------------------------------------------------------------------------
@@ -229,7 +229,7 @@ class EfactOseService
      */
     public function obtenerXml(string $ticket): array
     {
-        return $this->descargarArchivo("{$this->baseUrl}/v1/xml/{$ticket}", 'xml-' . $ticket . '.xml', 'application/xml');
+        return $this->descargarArchivo("{$this->baseUrl}/v1/xml/{$ticket}", 'xml-' . $ticket . '.xml', 'application/xml', 'xml');
     }
 
     // -------------------------------------------------------------------------
@@ -243,46 +243,116 @@ class EfactOseService
      */
     public function obtenerPdf(string $ticket): array
     {
-        return $this->descargarArchivo("{$this->baseUrl}/v1/pdf/{$ticket}", 'pdf-' . $ticket . '.pdf', 'application/pdf');
+        return $this->descargarArchivo("{$this->baseUrl}/v1/pdf/{$ticket}", 'pdf-' . $ticket . '.pdf', 'application/pdf', 'pdf');
     }
 
     /**
-     * @return array{success: bool, content?: string, filename?: string, mime?: string, body?: array, error?: string, status?: int}
+     * Cantidad de intentos y espera entre ellos cuando eFact responde "en proceso"
+     * (el documento aún no terminó de generarse en el OSE).
      */
-    private function descargarArchivo(string $url, string $defaultFilename, string $defaultMime): array
+    private const INTENTOS_ARCHIVO_EN_PROCESO = 3;
+    private const ESPERA_ENTRE_INTENTOS_MICROSEGUNDOS = 1500000; // 1.5s
+
+    /**
+     * @return array{success: bool, content?: string, filename?: string, mime?: string, body?: array, error?: string, status?: int, en_proceso?: bool}
+     */
+    private function descargarArchivo(string $url, string $defaultFilename, string $defaultMime, string $tipo = 'archivo'): array
     {
         $tokenResult = $this->tokenParaRequests();
         if (! $tokenResult['success']) {
             return ['success' => false, 'error' => $tokenResult['error'], 'body' => $tokenResult['body'] ?? []];
         }
 
-        try {
-            $response = Http::withToken($tokenResult['token'])
-                ->timeout(30)
-                ->get($url);
+        $ultimoResultadoEnProceso = null;
 
-            if (! $response->successful()) {
+        for ($intento = 1; $intento <= self::INTENTOS_ARCHIVO_EN_PROCESO; $intento++) {
+            try {
+                $response = Http::withToken($tokenResult['token'])
+                    ->timeout(30)
+                    ->get($url);
+
+                if (! $response->successful()) {
+                    return [
+                        'success' => false,
+                        'status'  => $response->status(),
+                        'error'   => 'Error al descargar archivo eFact: HTTP ' . $response->status(),
+                        'body'    => $this->decodeResponseBody($response),
+                    ];
+                }
+
+                $contenido = $response->body();
+                $contentType = (string) $response->header('Content-Type');
+
+                if (! $this->pareceArchivoValido($contenido, $contentType, $tipo)) {
+                    // eFact respondió 2xx pero con un JSON de estado (p. ej. code "-9998" "En proceso.")
+                    // en vez del archivo binario: el documento todavía se está generando en el OSE.
+                    $bodyJson = $this->decodeResponseBody($response);
+                    $ultimoResultadoEnProceso = [
+                        'success'           => false,
+                        'status'            => 409,
+                        'error'             => 'El documento aún está en proceso en eFact',
+                        'body'              => $bodyJson,
+                        'efact_code'        => $bodyJson['code'] ?? null,
+                        'efact_description' => $bodyJson['description'] ?? null,
+                        'en_proceso'        => true,
+                    ];
+
+                    if ($intento < self::INTENTOS_ARCHIVO_EN_PROCESO) {
+                        usleep(self::ESPERA_ENTRE_INTENTOS_MICROSEGUNDOS);
+                        continue;
+                    }
+
+                    return $ultimoResultadoEnProceso;
+                }
+
+                return [
+                    'success'    => true,
+                    'status'     => $response->status(),
+                    'content'    => $contenido,
+                    'filename'   => $this->resolverNombreDescarga($response->header('Content-Disposition'), $defaultFilename),
+                    'mime'       => $contentType ?: $defaultMime,
+                ];
+            } catch (\Exception $e) {
                 return [
                     'success' => false,
-                    'status'  => $response->status(),
-                    'error'   => 'Error al descargar archivo eFact: HTTP ' . $response->status(),
-                    'body'    => $this->decodeResponseBody($response),
+                    'error'   => 'Excepción al descargar archivo eFact: ' . $e->getMessage(),
                 ];
             }
-
-            return [
-                'success'    => true,
-                'status'     => $response->status(),
-                'content'    => $response->body(),
-                'filename'   => $this->resolverNombreDescarga($response->header('Content-Disposition'), $defaultFilename),
-                'mime'       => $response->header('Content-Type') ?: $defaultMime,
-            ];
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'error'   => 'Excepción al descargar archivo eFact: ' . $e->getMessage(),
-            ];
         }
+
+        return $ultimoResultadoEnProceso ?? [
+            'success' => false,
+            'error'   => 'No se pudo descargar el archivo eFact',
+        ];
+    }
+
+    /**
+     * Determina si el cuerpo de la respuesta luce como el archivo esperado (PDF/XML/CDR)
+     * y no como un JSON de estado (p. ej. `{"code":"-9998","description":"En proceso."}`)
+     * que eFact puede devolver con HTTP 2xx mientras el documento sigue en proceso.
+     */
+    private function pareceArchivoValido(string $contenido, string $contentType, string $tipo): bool
+    {
+        $contenidoTrim = ltrim($contenido);
+
+        if (str_contains(strtolower($contentType), 'json')) {
+            return false;
+        }
+
+        if ($contenidoTrim === '') {
+            return false;
+        }
+
+        // Un JSON de estado siempre arranca con "{" o "[", nunca un PDF/XML/ZIP válido.
+        if (str_starts_with($contenidoTrim, '{') || str_starts_with($contenidoTrim, '[')) {
+            return false;
+        }
+
+        if ($tipo === 'pdf') {
+            return str_starts_with($contenidoTrim, '%PDF');
+        }
+
+        return true;
     }
 
     // -------------------------------------------------------------------------

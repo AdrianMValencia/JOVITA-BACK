@@ -17,6 +17,7 @@ class EfactEmisionParamsBuilder
     public function __construct(
         private readonly ComprobanteIgvService $igvService,
         private readonly EfactEmisionContextEnricher $contextEnricher,
+        private readonly EfactCorrelativoCpeService $correlativoCpeService,
     ) {}
 
     public function desdeRecibo(Recibos $r): array
@@ -40,12 +41,14 @@ class EfactEmisionParamsBuilder
             $detalles[] = $det;
         }
 
+        $cpe = $this->resolverSerieNumeroCpe($r);
+
         return $this->contextEnricher->enriquecer($this->igvService->aplicarIgvAParams([
             'idPuntoVenta'       => $r->idPuntoVenta,
             'puntoventa'         => $r->puntoventa,
-            'tipoComprobante'    => $this->inferTipoComprobanteDesdeSerie((string) ($r->series ?? '')),
-            'serieComprobante'   => $r->series,
-            'numeroComprobante'  => $r->numeracion,
+            'tipoComprobante'    => $cpe['tipo'],
+            'serieComprobante'   => $cpe['serie'],
+            'numeroComprobante'  => $cpe['numero'],
             'fechaEmision'       => $r->fechaEmision,
             'documento'          => $r->documento,
             'numeroDocumento'    => $r->documento,
@@ -123,6 +126,47 @@ class EfactEmisionParamsBuilder
             'tipoCambio'         => (float) ($c->tipoCambio ?? 1),
             'detalles'           => $detalles,
         ]));
+    }
+
+    /**
+     * CPE SUNAT real a usar al emitir/agrupar un recibo pendiente.
+     *
+     * - Si el recibo ya tiene `efact_comprobante_serie`/`efact_comprobante_numero` (reintento
+     *   de una emisión previa), se respetan tal cual: nunca se pisa un correlativo ya asignado.
+     * - Si no, se resuelve la serie de boleta/factura real del punto de venta (p. ej. "BE01")
+     *   y se pide el siguiente correlativo disponible. Nunca se usa la serie del ticket POS
+     *   interno (p. ej. "TJPR") como si fuera el CPE SUNAT.
+     * - Si no fue posible resolver una serie CPE distinta, se conserva el comportamiento
+     *   previo (serie/numeración del ticket) como último recurso.
+     *
+     * @return array{serie:mixed,numero:mixed,tipo:string}
+     */
+    private function resolverSerieNumeroCpe(Recibos $r): array
+    {
+        $serieAsignada = trim((string) ($r->efact_comprobante_serie ?? ''));
+        $numeroAsignado = trim((string) ($r->efact_comprobante_numero ?? ''));
+        if ($serieAsignada !== '' && $numeroAsignado !== '') {
+            return [
+                'serie' => $serieAsignada,
+                'numero' => (int) $numeroAsignado,
+                'tipo' => $this->inferTipoComprobanteDesdeSerie($serieAsignada),
+            ];
+        }
+
+        $serieCpe = $this->correlativoCpeService->resolverSerieCpeDefaultParaRecibo($r);
+        if ($serieCpe !== null) {
+            return [
+                'serie' => $serieCpe,
+                'numero' => $this->correlativoCpeService->resolverSiguienteCorrelativo($serieCpe, (int) $r->idPuntoVenta),
+                'tipo' => $this->inferTipoComprobanteDesdeSerie($serieCpe),
+            ];
+        }
+
+        return [
+            'serie' => $r->series,
+            'numero' => $r->numeracion,
+            'tipo' => $this->inferTipoComprobanteDesdeSerie((string) ($r->series ?? '')),
+        ];
     }
 
     /**
