@@ -94,21 +94,13 @@ class EfactCorrelativoCpeService
         $serieNorm = strtoupper(trim($serieCpe));
 
         $ultimoEmitidoBd = $this->maxUltimoEmitidoPorSerie($serieNorm, $idPuntoVenta);
-        if ($ultimoEmitidoBd === 0 && $idPuntoVenta !== null) {
-            $ultimoEmitidoBd = $this->maxUltimoEmitidoPorSerie($serieNorm, null);
-        }
 
-        $record = SeriesTickets::query()
-            ->when($idPuntoVenta !== null && $idPuntoVenta > 0, fn ($q) => $q->where('idPuntoVenta', $idPuntoVenta))
-            ->whereRaw('UPPER(TRIM(CAST(serie AS CHAR))) = ?', [$serieNorm])
-            ->orderBy('id', 'asc')
-            ->first();
-        if (! $record) {
-            $record = SeriesTickets::query()
-                ->whereRaw('UPPER(TRIM(CAST(serie AS CHAR))) = ?', [$serieNorm])
-                ->orderBy('id', 'asc')
-                ->first();
+        $recordQuery = SeriesTickets::query()
+            ->whereRaw('UPPER(TRIM(CAST(serie AS CHAR))) = ?', [$serieNorm]);
+        if ($idPuntoVenta !== null && $idPuntoVenta > 0) {
+            $recordQuery->where('idPuntoVenta', $idPuntoVenta);
         }
+        $record = $recordQuery->orderBy('id', 'asc')->first();
 
         $numer = $record
             ? NumeracionTickets::query()->where('idSeriesTickets', $record->id)->orderBy('id', 'desc')->first()

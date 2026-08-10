@@ -838,21 +838,12 @@ class RecibosController extends Controller
             /** @var EfactCorrelativoCpeService $cpeCorr */
             $cpeCorr = app(EfactCorrelativoCpeService::class);
             $ultimoEmitidoBd = $cpeCorr->maxUltimoEmitidoPorSerie($serieNorm, $idPvInt);
-            if ($ultimoEmitidoBd === 0) {
-                $ultimoEmitidoBd = $cpeCorr->maxUltimoEmitidoPorSerie($serieNorm, null);
-            }
 
             $record = SeriesTickets::query()
                 ->where('idPuntoVenta', $idPvInt)
                 ->whereRaw('UPPER(TRIM(CAST(serie AS CHAR))) = ?', [$serieNorm])
                 ->orderBy('id', 'asc')
                 ->first();
-            if (! $record) {
-                $record = SeriesTickets::query()
-                    ->whereRaw('UPPER(TRIM(CAST(serie AS CHAR))) = ?', [$serieNorm])
-                    ->orderBy('id', 'asc')
-                    ->first();
-            }
 
             $numer = $record
                 ? NumeracionTickets::query()->where('idSeriesTickets', $record->id)->orderBy('id', 'desc')->first()

@@ -197,22 +197,15 @@ class ComprobantesController extends Controller
 
         // optionally filter by punto de venta if provided
         $idPunto = $request->query('idPuntoVenta');
+        $idPvInt = ! empty($idPunto) ? (int) $idPunto : null;
         $query = SeriesTickets::where('serie', $serie);
-        if (! empty($idPunto)) {
-            $query->where('idPuntoVenta', $idPunto);
+        if ($idPvInt !== null && $idPvInt > 0) {
+            $query->where('idPuntoVenta', $idPvInt);
         }
         $record = $query->first();
 
-        // if the caller supplied a point but no row was found, fall back to any
-        // series record so we at least return numeration instead of 404. this
-        // mirrors the previous behaviour before the idPunto filter was added.
-        $usedFallback = false;
-        if (! $record && ! empty($idPunto)) {
-            $record = SeriesTickets::where('serie', $serie)->first();
-            $usedFallback = true;
-        }
         if (! $record) {
-            return response()->json(['message' => 'serie not found'], 404);
+            return response()->json(['message' => 'serie not found for punto de venta', 'status' => 404], 404);
         }
 
         $numer = NumeracionTickets::where('idSeriesTickets', $record->id)
@@ -220,13 +213,9 @@ class ComprobantesController extends Controller
                     ->first();
 
         $serieNorm = strtoupper(trim((string) $serie));
-        $idPvInt = ! empty($idPunto) ? (int) $idPunto : null;
         /** @var EfactCorrelativoCpeService $cpeCorr */
         $cpeCorr = app(EfactCorrelativoCpeService::class);
         $ultimoEmitidoBd = $cpeCorr->maxUltimoEmitidoPorSerie($serieNorm, $idPvInt);
-        if ($ultimoEmitidoBd === 0 && $idPvInt !== null) {
-            $ultimoEmitidoBd = $cpeCorr->maxUltimoEmitidoPorSerie($serieNorm, null);
-        }
         $desdeNumerador = $numer ? (int) ($numer->numeroActual ?? 0) : 0;
         // Próximo correlativo SUNAT: al menos último en BD + 1; el numerador no puede quedar por debajo.
         $siguiente = max($ultimoEmitidoBd + 1, $desdeNumerador, 1);
@@ -241,9 +230,6 @@ class ComprobantesController extends Controller
             'siguiente_es_correlativo_a_emitir' => true,
             'status'        => 200,
         ];
-        if ($usedFallback) {
-            $response['warning'] = 'serie exists but not for requested puntoVenta';
-        }
 
         return response()->json($response, 200);
     }
