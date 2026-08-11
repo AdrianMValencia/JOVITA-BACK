@@ -6,6 +6,7 @@ use App\Models\NumeracionTickets;
 use App\Models\PuntoVenta;
 use App\Models\Recibos;
 use App\Models\Series;
+use App\Services\EfactCorrelativoCpeService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -80,13 +81,17 @@ class NumeracionTicketsController extends Controller
     }
 
     /**
-     * Para la respuesta JSON: alinea `numeroActual` con el máximo en `tbl_recibos` cuando el numerador
-     * va adelantado (+1 antiguo) o desincronizado (p. ej. muestra 199 pero el último ticket es 198).
+     * Alinea `numeroActual` con el último correlativo emitido:
+     * - TJxx: máximo en tbl_recibos (ticket POS).
+     * - BE/FE: máximo CPE SUNAT en recibos/facturación eFact.
      *
      * @param  \Illuminate\Database\Eloquent\Collection<int, NumeracionTickets>|\Illuminate\Support\Collection  $items
      */
     private function alinearNumeroActualTicketPosConRecibos(int $idPuntoVenta, $items): void
     {
+        /** @var EfactCorrelativoCpeService $cpeCorr */
+        $cpeCorr = app(EfactCorrelativoCpeService::class);
+
         foreach ($items as $n) {
             $serieRel = $n->relationLoaded('series') ? $n->getRelation('series') : null;
             if (! $serieRel) {
@@ -96,14 +101,23 @@ class NumeracionTicketsController extends Controller
             if ($serie === '') {
                 continue;
             }
-            $maxR = Recibos::maxNumeracionParaSeriePuntoVenta($idPuntoVenta, $serie);
+            $serieUpper = strtoupper($serie);
+
+            if (preg_match('/^(BE|FE)\d+/i', $serieUpper)) {
+                $maxR = $cpeCorr->maxUltimoEmitidoPorSerie($serieUpper, $idPuntoVenta);
+            } else {
+                $maxR = Recibos::maxNumeracionParaSeriePuntoVenta($idPuntoVenta, $serie);
+            }
+
             $d = (int) ($n->numeroActual ?? 0);
             if ($maxR > 0) {
                 if ($d !== $maxR) {
                     $n->numeroActual = $maxR;
+                    $n->save();
                 }
-            } elseif ($d === 1) {
+            } elseif ($d === 1 && ! preg_match('/^(BE|FE)\d+/i', $serieUpper)) {
                 $n->numeroActual = 0;
+                $n->save();
             }
         }
     }

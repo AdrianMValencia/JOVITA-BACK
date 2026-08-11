@@ -501,6 +501,16 @@ class RecibosController extends Controller
                 }
             }
 
+            if ($emitirEfact && $cpePersist !== null && ($result['success'] ?? false)) {
+                /** @var EfactCorrelativoCpeService $cpeCorr */
+                $cpeCorr = app(EfactCorrelativoCpeService::class);
+                $cpeCorr->syncNumeroActualSerieCpe(
+                    (int) ($recibos->idPuntoVenta ?? 0),
+                    $cpePersist['serie'],
+                    (int) $cpePersist['numero_int']
+                );
+            }
+
             DB::commit();
         } catch (\Exception $e) {
             DB::rollBack();
@@ -837,6 +847,7 @@ class RecibosController extends Controller
 
             /** @var EfactCorrelativoCpeService $cpeCorr */
             $cpeCorr = app(EfactCorrelativoCpeService::class);
+            $siguiente = $cpeCorr->resolverSiguienteCorrelativo($serieNorm, $idPvInt);
             $ultimoEmitidoBd = $cpeCorr->maxUltimoEmitidoPorSerie($serieNorm, $idPvInt);
 
             $record = SeriesTickets::query()
@@ -849,7 +860,6 @@ class RecibosController extends Controller
                 ? NumeracionTickets::query()->where('idSeriesTickets', $record->id)->orderBy('id', 'desc')->first()
                 : null;
             $desdeNumerador = $numer ? (int) ($numer->numeroActual ?? 0) : 0;
-            $siguiente = max($ultimoEmitidoBd + 1, $desdeNumerador, 1);
 
             return response()->json([
                 'serie' => $serieNorm,
@@ -860,7 +870,8 @@ class RecibosController extends Controller
                 'ultimo_correlativo_emitido_bd' => $ultimoEmitidoBd,
                 'numeroActual_bd' => $desdeNumerador,
                 'numeroActual_numerador' => $desdeNumerador,
-                'numeroActual_es_siguiente_correlativo_disponible' => true,
+                'numeroActual_es_siguiente_correlativo_disponible' => false,
+                'numeroActual_es_ultimo_correlativo_usado' => true,
                 'siguiente_es_correlativo_a_emitir' => true,
                 'status' => 200,
             ], 200);

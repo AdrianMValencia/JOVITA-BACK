@@ -17,55 +17,21 @@ class EfactCorrelativoCpeService
     public function maxUltimoEmitidoPorSerie(string $serieNorm, ?int $idPuntoVenta): int
     {
         $serieNorm = strtoupper(trim($serieNorm));
+        if ($serieNorm === '') {
+            return 0;
+        }
+
         $m = 0;
 
-        if (Schema::hasTable('tbl_facturacion')) {
-            if (Schema::hasColumn('tbl_facturacion', 'efact_comprobante_serie')) {
-                $qE = Comprobantes::query()
-                    ->whereRaw('UPPER(TRIM(CAST(efact_comprobante_serie AS CHAR))) = ?', [$serieNorm]);
-                if ($idPuntoVenta !== null && $idPuntoVenta > 0) {
-                    $qE->where('idPuntoVenta', $idPuntoVenta);
-                }
-                foreach (['efact_comprobante_numero', 'numeracion', 'numero'] as $col) {
-                    if (Schema::hasColumn('tbl_facturacion', $col)) {
-                        $mx = (int) ((clone $qE)->max(DB::raw('CAST(' . $col . ' AS UNSIGNED)')) ?? 0);
-                        $m = max($m, $mx);
-                    }
-                }
+        if (Schema::hasTable('tbl_facturacion') && Schema::hasColumn('tbl_facturacion', 'efact_comprobante_serie')) {
+            $qE = Comprobantes::query()
+                ->whereRaw('UPPER(TRIM(CAST(efact_comprobante_serie AS CHAR))) = ?', [$serieNorm]);
+            if ($idPuntoVenta !== null && $idPuntoVenta > 0) {
+                $qE->where('idPuntoVenta', $idPuntoVenta);
             }
-
-            if (Schema::hasColumn('tbl_facturacion', 'serie')) {
-                $qLegacy = Comprobantes::query()
-                    ->whereRaw('UPPER(TRIM(CAST(serie AS CHAR))) = ?', [$serieNorm]);
-                if (Schema::hasColumn('tbl_facturacion', 'efact_comprobante_serie')) {
-                    $qLegacy->where(function ($w) {
-                        $w->whereNull('efact_comprobante_serie')
-                            ->orWhereRaw('TRIM(CAST(efact_comprobante_serie AS CHAR)) = ?', ['']);
-                    });
-                }
-                if ($idPuntoVenta !== null && $idPuntoVenta > 0) {
-                    $qLegacy->where('idPuntoVenta', $idPuntoVenta);
-                }
-                foreach (['numeracion', 'numero'] as $col) {
-                    if (Schema::hasColumn('tbl_facturacion', $col)) {
-                        $mx = (int) ((clone $qLegacy)->max(DB::raw('CAST(' . $col . ' AS UNSIGNED)')) ?? 0);
-                        $m = max($m, $mx);
-                    }
-                }
-            }
-
-            if (Schema::hasColumn('tbl_facturacion', 'serie')) {
-                $qSer = Comprobantes::query()
-                    ->whereRaw('UPPER(TRIM(CAST(serie AS CHAR))) = ?', [$serieNorm]);
-                if ($idPuntoVenta !== null && $idPuntoVenta > 0) {
-                    $qSer->where('idPuntoVenta', $idPuntoVenta);
-                }
-                foreach (['numeracion', 'numero', 'efact_comprobante_numero'] as $col) {
-                    if (Schema::hasColumn('tbl_facturacion', $col)) {
-                        $mx = (int) ((clone $qSer)->max(DB::raw('CAST(' . $col . ' AS UNSIGNED)')) ?? 0);
-                        $m = max($m, $mx);
-                    }
-                }
+            if (Schema::hasColumn('tbl_facturacion', 'efact_comprobante_numero')) {
+                $mx = (int) ((clone $qE)->max(DB::raw('CAST(efact_comprobante_numero AS UNSIGNED)')) ?? 0);
+                $m = max($m, $mx);
             }
         }
 
@@ -85,13 +51,15 @@ class EfactCorrelativoCpeService
     }
 
     /**
-     * Siguiente correlativo disponible para una serie CPE SUNAT dada, combinando el
-     * máximo ya emitido en BD con el `numeroActual` configurado en `tbl_numeracion_tickets`
-     * (misma lógica que `RecibosController::numeracion()` cuando recibe `serieComprobante`).
+     * Siguiente correlativo CPE a emitir para una serie SUNAT (BE/FE), por tienda.
+     * `numeroActual` en numeración = último correlativo usado (igual que tickets POS).
      */
     public function resolverSiguienteCorrelativo(string $serieCpe, ?int $idPuntoVenta): int
     {
         $serieNorm = strtoupper(trim($serieCpe));
+        if ($serieNorm === '') {
+            return 1;
+        }
 
         $ultimoEmitidoBd = $this->maxUltimoEmitidoPorSerie($serieNorm, $idPuntoVenta);
 
@@ -105,9 +73,49 @@ class EfactCorrelativoCpeService
         $numer = $record
             ? NumeracionTickets::query()->where('idSeriesTickets', $record->id)->orderBy('id', 'desc')->first()
             : null;
-        $desdeNumerador = $numer ? (int) ($numer->numeroActual ?? 0) : 0;
+        $d = $numer ? (int) ($numer->numeroActual ?? 0) : 0;
 
-        return max($ultimoEmitidoBd + 1, $desdeNumerador, 1);
+        $ultimoNumerador = 0;
+        if ($numer) {
+            $ultimoNumerador = ($d === $ultimoEmitidoBd + 1) ? $ultimoEmitidoBd : $d;
+        }
+
+        $base = max($ultimoEmitidoBd, $ultimoNumerador);
+
+        return max(1, $base + 1);
+    }
+
+    /**
+     * Actualiza tbl_numeracion_tickets para serie CPE (BE/FE) tras una emisión exitosa.
+     */
+    public function syncNumeroActualSerieCpe(int $idPuntoVenta, string $serieCpe, int $numeroUsado): void
+    {
+        $serieNorm = strtoupper(trim($serieCpe));
+        if ($idPuntoVenta < 1 || $serieNorm === '' || ! preg_match('/^(BE|FE)\d+/i', $serieNorm)) {
+            return;
+        }
+
+        $record = SeriesTickets::query()
+            ->where('idPuntoVenta', $idPuntoVenta)
+            ->whereRaw('UPPER(TRIM(CAST(serie AS CHAR))) = ?', [$serieNorm])
+            ->orderBy('id', 'asc')
+            ->first();
+        if (! $record) {
+            return;
+        }
+
+        $numer = NumeracionTickets::query()
+            ->where('idSeriesTickets', $record->id)
+            ->orderBy('id', 'desc')
+            ->lockForUpdate()
+            ->first();
+        if (! $numer) {
+            return;
+        }
+
+        $maxEmitido = $this->maxUltimoEmitidoPorSerie($serieNorm, $idPuntoVenta);
+        $numer->numeroActual = max($numeroUsado, $maxEmitido);
+        $numer->save();
     }
 
     /**

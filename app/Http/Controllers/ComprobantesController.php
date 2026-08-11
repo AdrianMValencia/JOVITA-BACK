@@ -215,10 +215,9 @@ class ComprobantesController extends Controller
         $serieNorm = strtoupper(trim((string) $serie));
         /** @var EfactCorrelativoCpeService $cpeCorr */
         $cpeCorr = app(EfactCorrelativoCpeService::class);
+        $siguiente = $cpeCorr->resolverSiguienteCorrelativo($serieNorm, $idPvInt);
         $ultimoEmitidoBd = $cpeCorr->maxUltimoEmitidoPorSerie($serieNorm, $idPvInt);
         $desdeNumerador = $numer ? (int) ($numer->numeroActual ?? 0) : 0;
-        // Próximo correlativo SUNAT: al menos último en BD + 1; el numerador no puede quedar por debajo.
-        $siguiente = max($ultimoEmitidoBd + 1, $desdeNumerador, 1);
 
         $response = [
             'serie'         => $serie,
